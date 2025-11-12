@@ -1,0 +1,21 @@
+{
+  "mode": "tcp",
+  "tcp_port": 1502,
+  "unit_id": 1,
+  "coils": {
+    "start_address": 0,
+    "count": 10
+  },
+  "input_bits": {
+    "start_address": 100,
+    "count": 8
+  },
+  "holding_registers": {
+    "start_address": 40000,
+    "count": 20
+  },
+  "input_registers": {
+    "start_address": 30000,
+    "count": 12
+  }
+}
