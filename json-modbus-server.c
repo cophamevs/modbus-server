@@ -24,7 +24,12 @@ modbus_mapping_t *mb_mapping;
 modbus_t *ctx_tcp = NULL;
 modbus_t *ctx_rtu = NULL;
 int tcp_listen_sock = -1;
-int tcp_conn_sock = -1;
+
+// Support multiple TCP clients
+#define MAX_TCP_CLIENTS 10
+int tcp_conn_socks[MAX_TCP_CLIENTS];
+int tcp_conn_count = 0;
+
 bool enable_tcp = false;
 bool enable_rtu = false;
 
@@ -138,6 +143,14 @@ static void set_nonblocking(int fd) {
     if(flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+// Helper: Find free slot in TCP client array
+static int find_free_tcp_client_slot(void) {
+    for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+        if(tcp_conn_socks[i] == -1) return i;
+    }
+    return -1;  // No free slot
+}
+
 // Signal handler for graceful shutdown
 static void signal_handler(int sig) {
     if(sig == SIGTERM || sig == SIGINT) {
@@ -165,7 +178,7 @@ static void write_registers(int start_idx, uint16_t *words, int count, ByteOrder
 }
 
 static void process_json(const char *json_str) {
-    log_debug("Received JSON: %s", json_str);
+    // log_debug("Received JSON: %s", json_str);
     cJSON *root = cJSON_Parse(json_str); if(!root) return;
     cJSON *cmd = cJSON_GetObjectItemCaseSensitive(root,"cmd");
     if(cJSON_IsString(cmd)){
@@ -248,6 +261,12 @@ static void run_server(void) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     
+    // Initialize TCP client array
+    for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+        tcp_conn_socks[i] = -1;
+    }
+    tcp_conn_count = 0;
+    
     uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
     
     // Initialize TCP if enabled
@@ -293,9 +312,17 @@ static void run_server(void) {
     while(server_state == STATE_RUNNING) {
         fd_set fds; FD_ZERO(&fds);
         
-        // Add TCP sockets
+        // Add TCP listen socket
         if(enable_tcp && tcp_listen_sock != -1) FD_SET(tcp_listen_sock, &fds);
-        if(enable_tcp && tcp_conn_sock != -1) FD_SET(tcp_conn_sock, &fds);
+        
+        // Add all active TCP client sockets
+        if(enable_tcp) {
+            for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                if(tcp_conn_socks[i] != -1) {
+                    FD_SET(tcp_conn_socks[i], &fds);
+                }
+            }
+        }
         
         // Add RTU serial port
         if(enable_rtu && ctx_rtu) {
@@ -305,7 +332,12 @@ static void run_server(void) {
         
         int maxfd = 0;
         if(enable_tcp && tcp_listen_sock > maxfd) maxfd = tcp_listen_sock;
-        if(enable_tcp && tcp_conn_sock > maxfd) maxfd = tcp_conn_sock;
+        // Find max fd among TCP clients
+        if(enable_tcp) {
+            for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                if(tcp_conn_socks[i] > maxfd) maxfd = tcp_conn_socks[i];
+            }
+        }
         if(enable_rtu && ctx_rtu) {
             int rtu_fd = modbus_get_socket(ctx_rtu);
             if(rtu_fd > maxfd) maxfd = rtu_fd;
@@ -313,23 +345,40 @@ static void run_server(void) {
         
         struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
         if(select(maxfd+1, &fds, NULL, NULL, &tv) > 0) {
-            // Handle TCP
+            // Handle TCP listen socket - accept new connections
             if(enable_tcp && tcp_listen_sock != -1 && FD_ISSET(tcp_listen_sock, &fds)) {
-                tcp_conn_sock = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
-                modbus_set_socket(ctx_tcp, tcp_conn_sock);
-                log_debug("TCP client connected: %d", tcp_conn_sock);
+                int slot = find_free_tcp_client_slot();
+                if(slot != -1) {
+                    int new_conn = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
+                    if(new_conn != -1) {
+                        tcp_conn_socks[slot] = new_conn;
+                        tcp_conn_count++;
+                        log_debug("TCP client connected (slot %d, fd %d), total clients: %d", slot, new_conn, tcp_conn_count);
+                    }
+                } else {
+                    log_debug("Max TCP clients reached (%d), rejecting new connection", MAX_TCP_CLIENTS);
+                    int temp_sock = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
+                    if(temp_sock != -1) close(temp_sock);
+                }
             }
             
-            if(enable_tcp && tcp_conn_sock != -1 && FD_ISSET(tcp_conn_sock, &fds)) {
-                int rc = modbus_receive(ctx_tcp, query);
-                if(rc > 0) {
-                    if(modbus_reply(ctx_tcp, query, rc, mb_mapping) == -1) {
-                        log_debug("TCP reply failed: %s", modbus_strerror(errno));
+            // Handle data from all TCP clients
+            if(enable_tcp) {
+                for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                    if(tcp_conn_socks[i] != -1 && FD_ISSET(tcp_conn_socks[i], &fds)) {
+                        modbus_set_socket(ctx_tcp, tcp_conn_socks[i]);
+                        int rc = modbus_receive(ctx_tcp, query);
+                        if(rc > 0) {
+                            if(modbus_reply(ctx_tcp, query, rc, mb_mapping) == -1) {
+                                log_debug("TCP reply failed for client %d: %s", i, modbus_strerror(errno));
+                            }
+                        } else if(rc == -1) {
+                            log_debug("TCP client disconnect (slot %d)", i);
+                            close(tcp_conn_socks[i]);
+                            tcp_conn_socks[i] = -1;
+                            tcp_conn_count--;
+                        }
                     }
-                } else if(rc == -1) {
-                    log_debug("TCP client disconnect");
-                    close(tcp_conn_sock);
-                    tcp_conn_sock = -1;
                 }
             }
             
@@ -355,7 +404,14 @@ static void run_server(void) {
     
     // Cleanup
     if(enable_tcp) {
-        if(tcp_conn_sock != -1) close(tcp_conn_sock);
+        // Close all client connections
+        for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+            if(tcp_conn_socks[i] != -1) {
+                close(tcp_conn_socks[i]);
+                tcp_conn_socks[i] = -1;
+            }
+        }
+        tcp_conn_count = 0;
         if(tcp_listen_sock != -1) close(tcp_listen_sock);
         modbus_free(ctx_tcp);
     }
@@ -375,7 +431,7 @@ int main(void) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     
-    printf("{\"mode\":\"daemon\",\"ready\":true}\n");
+    printf("{\"ready\":true}\n");
     fflush(stdout);
     
     uint8_t query[MODBUS_TCP_MAX_ADU_LENGTH];
@@ -389,7 +445,14 @@ int main(void) {
         // Add server sockets only if running
         if(server_state == STATE_RUNNING) {
             if(enable_tcp && tcp_listen_sock != -1) FD_SET(tcp_listen_sock, &fds);
-            if(enable_tcp && tcp_conn_sock != -1) FD_SET(tcp_conn_sock, &fds);
+            // Add all active TCP client sockets
+            if(enable_tcp) {
+                for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                    if(tcp_conn_socks[i] != -1) {
+                        FD_SET(tcp_conn_socks[i], &fds);
+                    }
+                }
+            }
             if(enable_rtu && ctx_rtu) {
                 int rtu_fd = modbus_get_socket(ctx_rtu);
                 if(rtu_fd != -1) FD_SET(rtu_fd, &fds);
@@ -399,7 +462,12 @@ int main(void) {
         int maxfd = STDIN_FILENO;
         if(server_state == STATE_RUNNING) {
             if(enable_tcp && tcp_listen_sock > maxfd) maxfd = tcp_listen_sock;
-            if(enable_tcp && tcp_conn_sock > maxfd) maxfd = tcp_conn_sock;
+            // Find max fd among TCP clients
+            if(enable_tcp) {
+                for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                    if(tcp_conn_socks[i] > maxfd) maxfd = tcp_conn_socks[i];
+                }
+            }
             if(enable_rtu && ctx_rtu) {
                 int rtu_fd = modbus_get_socket(ctx_rtu);
                 if(rtu_fd > maxfd) maxfd = rtu_fd;
@@ -437,6 +505,11 @@ int main(void) {
                     modbus_set_debug(ctx_tcp, FALSE);
                     tcp_listen_sock = modbus_tcp_listen(ctx_tcp, 1);
                     if(tcp_listen_sock == -1) { fprintf(stderr,"TCP listen failed\n"); continue; }
+                    // Initialize TCP client array
+                    for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                        tcp_conn_socks[i] = -1;
+                    }
+                    tcp_conn_count = 0;
                     log_debug("TCP Server listening on port %d", tcp_port);
                 }
                 
@@ -480,11 +553,17 @@ int main(void) {
         // Cleanup when stopping
         if(server_state == STATE_STOPPED && mb_mapping) {
             if(enable_tcp) {
-                if(tcp_conn_sock != -1) close(tcp_conn_sock);
+                // Close all TCP client connections
+                for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                    if(tcp_conn_socks[i] != -1) {
+                        close(tcp_conn_socks[i]);
+                        tcp_conn_socks[i] = -1;
+                    }
+                }
+                tcp_conn_count = 0;
                 if(tcp_listen_sock != -1) close(tcp_listen_sock);
                 modbus_free(ctx_tcp);
                 tcp_listen_sock = -1;
-                tcp_conn_sock = -1;
                 ctx_tcp = NULL;
             }
             if(enable_rtu) {
@@ -499,23 +578,40 @@ int main(void) {
         
         // Handle connections only when running
         if(server_state == STATE_RUNNING && ret > 0) {
-            // Handle TCP
+            // Handle TCP listen socket - accept new connections
             if(enable_tcp && tcp_listen_sock != -1 && FD_ISSET(tcp_listen_sock, &fds)) {
-                tcp_conn_sock = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
-                modbus_set_socket(ctx_tcp, tcp_conn_sock);
-                log_debug("TCP client connected: %d", tcp_conn_sock);
+                int slot = find_free_tcp_client_slot();
+                if(slot != -1) {
+                    int new_conn = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
+                    if(new_conn != -1) {
+                        tcp_conn_socks[slot] = new_conn;
+                        tcp_conn_count++;
+                        log_debug("TCP client connected (slot %d, fd %d), total clients: %d", slot, new_conn, tcp_conn_count);
+                    }
+                } else {
+                    log_debug("Max TCP clients reached (%d), rejecting new connection", MAX_TCP_CLIENTS);
+                    int temp_sock = modbus_tcp_accept(ctx_tcp, &tcp_listen_sock);
+                    if(temp_sock != -1) close(temp_sock);
+                }
             }
             
-            if(enable_tcp && tcp_conn_sock != -1 && FD_ISSET(tcp_conn_sock, &fds)) {
-                int rc = modbus_receive(ctx_tcp, query);
-                if(rc > 0) {
-                    if(modbus_reply(ctx_tcp, query, rc, mb_mapping) == -1) {
-                        log_debug("TCP reply failed: %s", modbus_strerror(errno));
+            // Handle data from all TCP clients
+            if(enable_tcp) {
+                for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                    if(tcp_conn_socks[i] != -1 && FD_ISSET(tcp_conn_socks[i], &fds)) {
+                        modbus_set_socket(ctx_tcp, tcp_conn_socks[i]);
+                        int rc = modbus_receive(ctx_tcp, query);
+                        if(rc > 0) {
+                            if(modbus_reply(ctx_tcp, query, rc, mb_mapping) == -1) {
+                                log_debug("TCP reply failed for client %d: %s", i, modbus_strerror(errno));
+                            }
+                        } else if(rc == -1) {
+                            log_debug("TCP client disconnect (slot %d)", i);
+                            close(tcp_conn_socks[i]);
+                            tcp_conn_socks[i] = -1;
+                            tcp_conn_count--;
+                        }
                     }
-                } else if(rc == -1) {
-                    log_debug("TCP client disconnect");
-                    close(tcp_conn_sock);
-                    tcp_conn_sock = -1;
                 }
             }
             
@@ -568,10 +664,17 @@ int main(void) {
     // Final cleanup before exit
     if(mb_mapping) {
         if(enable_tcp) {
-            if(tcp_conn_sock != -1) close(tcp_conn_sock);
+            // Close all TCP client connections
+            for(int i = 0; i < MAX_TCP_CLIENTS; i++) {
+                if(tcp_conn_socks[i] != -1) {
+                    close(tcp_conn_socks[i]);
+                    tcp_conn_socks[i] = -1;
+                }
+            }
+            tcp_conn_count = 0;
             if(tcp_listen_sock != -1) close(tcp_listen_sock);
             if(ctx_tcp) modbus_free(ctx_tcp);
-            tcp_conn_sock = -1; tcp_listen_sock = -1; ctx_tcp = NULL;
+            tcp_listen_sock = -1; ctx_tcp = NULL;
         }
         if(enable_rtu) {
             if(ctx_rtu) { modbus_close(ctx_rtu); modbus_free(ctx_rtu); ctx_rtu = NULL; }
