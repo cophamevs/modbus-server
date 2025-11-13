@@ -1,16 +1,60 @@
 CC = gcc
-CFLAGS = -Wall -O2
-LIBS = -lmodbus
+CFLAGS = -Wall -Wextra -std=c11 -I./src -I./include -I./cJSON
+LDFLAGS = -lmodbus -lcjson -lm -lws2_32
 
-TARGET = json-modbus-server
-SRCS = json-modbus-server.c
-OBJS = $(SRCS:.c=.o)
-LIBS = -L/usr/lib/arm-linux-gnueabihf -lcjson -lmodbus
+# Source directories
+SRC_DIR = src
+BUILD_DIR = build
+BIN_DIR = $(BUILD_DIR)/bin
+OBJ_DIR = $(BUILD_DIR)/obj
 
+# Source files
+SOURCES = \
+	$(SRC_DIR)/main.c \
+	$(SRC_DIR)/core/server_controller.c \
+	$(SRC_DIR)/adapters/modbus_backend.c \
+	$(SRC_DIR)/adapters/tcp_adapter.c \
+	$(SRC_DIR)/adapters/rtu_adapter.c \
+	$(SRC_DIR)/config/config_loader.c \
+	$(SRC_DIR)/json/json_command.c \
+	$(SRC_DIR)/utils/byte_order.c \
+	$(SRC_DIR)/utils/platform.c \
+	cJSON/cJSON.c
+
+# Object files
+OBJECTS = $(SOURCES:%.c=$(OBJ_DIR)/%.o)
+
+# Executable name
+TARGET = $(BIN_DIR)/modbus-server.exe
+
+# Default target
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ -lcjson $(LIBS)
+# Create directories
+$(OBJ_DIR) $(BIN_DIR):
+	@mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/adapters $(OBJ_DIR)/config $(OBJ_DIR)/json $(OBJ_DIR)/utils
+	@mkdir -p $(BIN_DIR)
 
+# Compile object files
+$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR) $(BIN_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Link executable
+$(TARGET): $(OBJECTS)
+	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
+	@echo "Build complete: $(TARGET)"
+
+# Clean
 clean:
-	rm -f $(TARGET) $(OBJS)
+	rm -rf $(BUILD_DIR)
+	@echo "Cleaned build directory"
+
+# Help
+help:
+	@echo "Makefile targets:"
+	@echo "  make          - Build the project"
+	@echo "  make clean    - Remove build artifacts"
+	@echo "  make help     - Show this help message"
+
+.PHONY: all clean help
