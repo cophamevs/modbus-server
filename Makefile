@@ -1,6 +1,19 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -I./src -I./include -I./cJSON
-LDFLAGS = -lmodbus -lcjson -lm -lws2_32
+
+# Detect platform
+ifeq ($(OS),Windows_NT)
+    # Windows
+    EXE_EXT = .exe
+    PLATFORM_LIBS = -lws2_32
+else
+    # Linux / Unix
+    EXE_EXT =
+    PLATFORM_LIBS =
+endif
+
+# On both platforms, we link libmodbus + libm
+LDFLAGS = -lmodbus -lm $(PLATFORM_LIBS)
 
 # Source directories
 SRC_DIR = src
@@ -24,8 +37,8 @@ SOURCES = \
 # Object files
 OBJECTS = $(SOURCES:%.c=$(OBJ_DIR)/%.o)
 
-# Executable name
-TARGET = $(BIN_DIR)/modbus-server.exe
+# Executable name (cross-platform)
+TARGET = $(BIN_DIR)/modbus-server$(EXE_EXT)
 
 # Default target
 all: $(TARGET)

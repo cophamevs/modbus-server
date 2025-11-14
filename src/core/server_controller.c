@@ -8,7 +8,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
-#include "cJSON/cJSON.h"
+#include "cJSON.h"
 
 #ifdef _WIN32
 #include <winsock2.h>

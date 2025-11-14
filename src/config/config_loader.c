@@ -1,6 +1,6 @@
 #include "config.h"
 #include "../utils/logging.h"
-#include "cJSON/cJSON.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

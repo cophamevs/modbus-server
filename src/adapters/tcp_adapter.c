@@ -3,7 +3,7 @@
 #include "../utils/platform.h"
 #include <stdlib.h>
 #include <string.h>
-
+#include <errno.h>
 int tcp_adapter_init(ModbusBackend *backend, const ModbusConfig *config) {
     backend->ctx_tcp = modbus_new_tcp(NULL, config->tcp_port);
     if (!backend->ctx_tcp) {

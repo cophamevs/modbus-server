@@ -1,7 +1,7 @@
 #include "json_command.h"
 #include "../utils/logging.h"
 #include "../utils/byte_order.h"
-#include "cJSON/cJSON.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
