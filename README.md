@@ -19,7 +19,7 @@ A lightweight Modbus server implementation with JSON configuration support, writ
 
 ### Compile
 ```bash
-cd modbus-server```
+cd modbus-server
 ```bash
 make all
 ```
