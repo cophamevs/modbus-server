@@ -21,12 +21,11 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
     
-    // Start server automatically on Windows
-    // On Linux, server starts when first client connects or via JSON command
+    // Start server automatically
     #ifdef _WIN32
     controller->state = STATE_RUNNING;
     #else
-    controller->state = STATE_STOPPED;
+    controller->state = STATE_RUNNING;
     #endif
     
     int ret = server_controller_run(controller);
