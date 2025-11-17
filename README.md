@@ -20,7 +20,6 @@ A lightweight Modbus server implementation with JSON configuration support, writ
 ### Compile
 ```bash
 cd modbus-server
-```bash
 make all
 ```
 
@@ -42,7 +41,7 @@ Edit `modbus_config.json` to configure:
 Run the server:
 
 ```bash
-./json-modbus-server
+./modbus-server
 ```
 
 For unit tests:
